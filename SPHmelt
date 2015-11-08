@@ -1,0 +1,377 @@
+using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+
+
+//----------------------------------------------------------------------------------------------------------------------
+/// @file SPHMelt.h
+///  SPHMelt class,  to create my normal grid, particles and index them accordingly.
+///  This is also the class I will use for all my particle calculations and updates
+/// Our main simulation class. Used to call all the other classes we have created.
+//----------------------------------------------------------------------------------------------------------------------
+
+public class SPHMelt
+{
+
+    // Simple structure to hold our external force data
+    public struct externalForce
+    {
+        public Vector3 sourcePos;
+        public float radius;
+        public float strength;
+        public bool push;
+    };
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  Our constructor, reads in the vetexes of our mesh and stores them in m_meshVerts
+    public SPHMelt(string _meshLocation)
+    {
+        m_model = Resources.Load(_meshLocation) as GameObject;
+        m_go = GameObject.Instantiate(m_model);
+        m_go.gameObject.SetActive(true);
+
+        //combine mesh func
+        MeshFilter[] meshFilters = m_go.GetComponentsInChildren<MeshFilter>();
+        CombineInstance[] combine = new CombineInstance[meshFilters.Length];
+        int i = 0;
+        while (i < meshFilters.Length) {
+            combine[i].mesh = meshFilters[i].sharedMesh;
+            combine[i].transform = meshFilters[i].transform.localToWorldMatrix;
+            meshFilters[i].gameObject.active = false;
+            i++;
+        }
+
+        
+       var mr = m_go.AddComponent<MeshRenderer>();
+       mr.sharedMaterial = new Material(Shader.Find("Standard(Invert)"));
+       m_go.AddComponent<MeshFilter>();
+       m_mesh = m_go.GetComponent<MeshFilter>().mesh = new Mesh();
+       m_go.GetComponent<MeshFilter>().mesh.CombineMeshes(combine, true);
+
+        m_mesh.Optimize();
+        m_mesh.MarkDynamic();
+        // Show our mesh simulation first
+        m_meshSim = true;
+
+        //fill the particle helper vars
+        var shader = Shader.Find("Legacy Shaders/VertexLit");
+        particle.lineMaterial = new Material(shader);
+        particle.lineMaterial.hideFlags = HideFlags.HideAndDontSave;
+        // Turn on alpha blending
+        particle.lineMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        particle.lineMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        // Turn backface culling off
+        particle.lineMaterial.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+        // Turn off depth writes
+        particle.lineMaterial.SetInt("_ZWrite", 0);
+
+        // Generate our particles //i replaced the function to generate near vertices noth inside and outside -- Maxim
+        genParticles(1442, 0.5f);
+        // Set the smoothing length for our hash function
+        m_SPHHash.setSmoothingLength(0.5f);
+        //fill our hash table with our particles
+        m_SPHHash.createHashTable(m_particles);
+
+        // Initialize our SPH solver
+        m_SPHSolver.setSmoothingLength(0.5f);
+        m_SPHSolver.initDensity(m_particles);
+
+        m_SPHSolver.setGasConstant(2760);
+        m_SPHSolver.setVisCoef(1000);
+
+
+        //m_SPHSolver.setGasConstant(1);
+        //m_SPHSolver.setVisCoef(0);
+
+        //initiallize our external force
+        setExternalForce(Vector3.zero);
+        // set the coeficient of restitution between the particle and the ground    
+        m_collisionSolver.setCoefOfRest(0.85f);
+        m_collisionSolver.setCoefOfFric(0.01f);
+
+
+
+
+        m_collisionSolver.addWall(new Vector3(1, 0, 0),  new Vector3(-15, 15, 0), true, 6, 6, 6);
+        m_collisionSolver.addWall(new Vector3(-1, 0, 0), new Vector3(15, 15, 0), true, 6, 6, 6);
+        m_collisionSolver.addWall(new Vector3(0, 0, 1), new Vector3(0, 15, -15), true, 6, 6, 6);
+        m_collisionSolver.addWall(new Vector3(0, 0, -1),  new Vector3(0, 15, 15), false, 0, 0, 0);
+        m_collisionSolver.addWall(new Vector3(0, 1, 0),  new Vector3(0, 0, 0), true, 6, 6, 6);    //currently 30 is not used because pure opengl doesnt have drawWalls API and DrawMesh uses instead with scale of 30
+        
+        for (int j = 0; j < m_particles.Count; j++)
+        {
+            //Check for initial collision, need to implement new function for this
+            m_collisionSolver.initParticleCollision(m_particles[j], m_particles);
+            //m_collisionSolver.calculateGroundCollision(m_particles[i],0);
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    // Our update function. Update particles with SPH, Collision and then rewrites to the VAO
+    public void Update()
+    {
+        float timeStep = Time.deltaTime;
+        List<particle> neighbours;
+        for(int i = 0; i < m_particles.Count; i++)
+        {
+            //Fetch the neighbours of our current particle
+            neighbours = m_SPHHash.getNeighbours(m_particles[i],15);
+            m_SPHSolver.setExternalForce(m_externalForce.sourcePos, m_externalForce.radius, m_externalForce.strength, m_externalForce.push);
+            //Calculate and update our particles forces
+            m_SPHSolver.calcForces(m_particles[i],neighbours,timeStep);
+            //Check for collision
+            m_collisionSolver.testCollisionWithWalls(m_particles[i], timeStep);
+        }
+
+        // rehash all our particles with our new locations
+        m_SPHHash.createHashTable(m_particles);
+
+        // Calcualate new normals and apply em
+        m_mesh.vertices = m_particles.Select(s=>s.getPos()).ToArray();  
+        m_mesh.RecalculateBounds();
+        m_mesh.RecalculateNormals();
+        
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// A functio to draw our mesh
+    public void drawMesh()
+    {
+        m_go.GetComponent<Renderer>().enabled = true;
+    }
+
+    public void hideMesh()
+    {
+        m_go.GetComponent<Renderer>().enabled = false;
+    }
+
+    public bool IsMeshDrawing()
+    {
+        return m_go.GetComponent<Renderer>().enabled;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  A function to create our particles from our mesh vertecies
+    /// @param _numParticles - The number of particles we want to create. If more than mesh verticies it will generate particles inside the mesh
+    /// @warning You must initialise the mesh first
+    public void genParticles(int _numParticles, float _mass)
+    {
+
+        for (int i = 0; i < m_meshVerts.Count; i += SKIPCOUNT)
+        {
+            particle tempPart = new particle(m_meshVerts[i],_mass);
+            //std::cout<<m_vboMesh[i].p1<<std::endl;
+            m_particles.Add(tempPart);
+        }
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Just a fucntion so the scene can queury how many particles so that we can write it to screen
+    public int getNumParticles()
+    {
+        return m_particles.Count;
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief calls draw function in all our particles
+    /// @param trans - the transformstack of our scene
+    public void drawParticles(Camera cam,Transform tr)
+    {
+        for(int i=0; i < m_particles.Count;i++){
+            m_particles[i].draw(cam,tr);
+        }
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief reset our clock. used if we pause the simulation
+    public void resetClock()
+    {
+       //no need clock internal unity clock TIme.deltaTime is updating
+    }
+    //---------------------------------------------------------------------------------------------------------------------
+    public void setExternalForce(Vector3 _sourcePos, float _radius = 0, float _forceStrength = 0, bool _push = true)
+    {
+        m_externalForce.sourcePos = _sourcePos; 
+        m_externalForce.radius = _radius; 
+        m_externalForce.strength = _forceStrength; 
+        m_externalForce.push = _push;
+    }
+
+    private static int externalForceLineCount = 24; //render circle line count
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief a function to draw the source of our external force.
+    /// @param _transformStack - Our global transform stack so that they can rotate with the scene
+    /// @param _cam - our scene camera so we can rotate with the scene
+    public void drawExternalForce(Transform tr,Camera _cam)
+    {
+        var col = new Color(0f, 0f, 1f, 1f);
+        float radius = m_externalForce.radius;
+        tr.position = m_externalForce.sourcePos;
+        particle.lineMaterial.SetPass(0);   //share a gl render line material with particles
+        GL.PushMatrix();
+        // Set transformation matrix for drawing to
+        // match our transform
+        GL.MultMatrix(tr.localToWorldMatrix);
+        // Draw lines
+        GL.Begin(GL.LINES);
+        GL.Color(col);
+        for (int i = 0; i < externalForceLineCount; ++i)
+        {
+            float a = i / (float) externalForceLineCount;      
+            float prevAngle = (i - 1)/(float)externalForceLineCount* (Mathf.PI * 2f);   
+            float angle = a * Mathf.PI * 2;
+            GL.Vertex3(Mathf.Cos(prevAngle) * radius, Mathf.Sin(prevAngle) * radius, 0);
+            GL.Vertex3(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius, 0);
+        }
+        GL.End();
+        GL.PopMatrix();
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief a function to draw the walls of our collision. Just used to pass paramiters to our collision class
+    /// @param _transformStack - Our global transform stack so that they can rotate with the scene
+    /// @param _cam - our scene camera so we can rotate the walls with the scene
+    public void drawCollision(Transform _transformStack,Camera _cam)
+    {
+        m_collisionSolver.drawWalls(_transformStack, _cam);
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief restarts the mesh simulation.
+    public void startMeshSim()
+    {
+        // remove all our previous particles
+        int numParticles = m_particles.Count;
+        float mass = m_particles[0].getMass();
+        for (int i = 0; i < m_particles.Count;i++){
+            m_particles.Remove(m_particles[i]);
+        }
+
+        m_particles.Clear();
+        genParticles(numParticles,mass);
+
+        // Set our hash prime numbers for the simulation
+        m_SPHHash.setPrime(0, 73856093);
+        m_SPHHash.setPrime(0, 19349663);
+        m_SPHHash.setPrime(0, 83492791);
+        // create our hash table from our new particles
+        m_SPHHash.createHashTable(m_particles);
+        //initialize the particles density
+        m_SPHSolver.initDensity(m_particles);
+        // Move our walls into collision //actually to the initial positions - maxim
+        m_collisionSolver.setWall(0,new Vector3(1,0,0),new Vector3(-15,15,0),true,6,6,6);
+        m_collisionSolver.setWall(1,new Vector3(-1,0,0),new Vector3(15,15,0),true,6,6,6);
+        m_collisionSolver.setWall(2,new Vector3(0,0,1),new Vector3(0,15,-15),true,6,6,6);
+        m_collisionSolver.setWall(3,new Vector3(0,0,-1),new Vector3(0,15,15),false,0,0,0);
+        m_collisionSolver.setWall(4,new Vector3(0,1,0), new Vector3(0,0,0),true,6,6,6);
+        for(int i=0; i<m_particles.Count;i++){
+            //Check for initial collision, need to implement new function for this
+            m_collisionSolver.initParticleCollision(m_particles[i],m_particles);
+        }
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief A function to toggle between our mesh simulation and our 2d simulation;
+    public void toggleSim()
+    {
+        //if mesh simulation running change to 2d simulation
+        if (m_meshSim)
+        {
+            twoDWaterSimStart();
+            m_meshSim = false;
+        }
+        //if 2d simulation running change to our mesh simulation
+        else
+        {
+            startMeshSim();
+            m_meshSim = true;
+        }
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief restarts the simumaltion
+    public void restart()
+    {
+        // If mesh sim running restart mesh sim
+        if (m_meshSim)
+        {
+            startMeshSim();
+        }
+        // else restart 2d sim
+        else
+        {
+            twoDWaterSimStart();
+        }
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief change the scene to a 2d water simulation so you can see the physics
+    public void twoDWaterSimStart()
+    {
+        // Delete all our particles
+    int numParticles = m_particles.Count;
+    float mass = m_particles[0].getMass();
+    for (int i = 0; i<m_particles.Count;i++){
+        m_particles.Remove(m_particles[i]);
+    }
+
+    //m_meshVerts.Clear();
+    m_particles.Clear();
+
+    //Create new particles
+    int row = 0;
+    for(int i=0; i<numParticles;i++){
+        var Pos =new Vector3(4f - (row % 2)*0.1f,15f + i*0.1f,0.05f);
+        m_particles.Add(new particle(Pos, mass));
+        row++;
+    }
+    // Found that I had better results in the 2d simulation with these prime numbers
+    m_SPHHash.setPrime(0, 1);
+    m_SPHHash.setPrime(0, 1);
+    m_SPHHash.setPrime(0, 1);
+    // Create our hash table for our new particles
+    m_SPHHash.createHashTable(m_particles);
+    // Initialize the density for all our particles
+    m_SPHSolver.initDensity(m_particles);
+        // Move our walls closer together
+        m_collisionSolver.setWall(0,new Vector3(1,0,0),new Vector3(-5,15,10),true,0.02f,0.02f,6);
+        m_collisionSolver.setWall(1,new Vector3(-1,0,0),new Vector3(5,15,10),true,0.02f,0.02f,6);
+        m_collisionSolver.setWall(2,new Vector3(0,0,1),new Vector3(0,15,10.1f),true,2,2,2);
+        m_collisionSolver.setWall(3,new Vector3(0,0,-1),new Vector3(0,15,10),false,0.02f,0.02f,0.02f);
+        m_collisionSolver.setWall(4,new Vector3(0,1,0),new Vector3(0,0,0),true,6,6,6); 
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    public const int SKIPCOUNT = 1; //TODO:  if > 0 then need to add distrubited in time frame simulation (!)
+
+    /// @brief vectors to store our mesh information from our obj.
+    private List<Vector3> m_meshVerts
+    {
+        get
+        {
+            return m_mesh.vertices.Where((v, i) => i % SKIPCOUNT == 0).ToList();
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief a vector to store particles created from the information in m_meshVerts
+    private List<particle> m_particles = new List<particle>();
+    //----------------------------------------------------------------------------------------------------------------------
+    private GameObject m_model;
+
+    private GameObject m_go;
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief A member to store our mesh
+    private Mesh m_mesh;     
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Our collision solver class
+    private collision m_collisionSolver =  new collision();
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Our SPH solver class
+    private SPHSolver m_SPHSolver = new SPHSolver();
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Our SPH Hashing class
+    private SPHHash m_SPHHash = new SPHHash();
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Amemeber for our external force used in our SPH calculations
+    private externalForce m_externalForce;
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief A member so we know what sim we are running
+    private bool m_meshSim;
+    //----------------------------------------------------------------------------------------------------------------------
+
+
+}
+
+
