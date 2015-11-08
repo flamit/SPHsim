@@ -1,0 +1,186 @@
+using System;
+using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+
+//----------------------------------------------------------------------------------------------------------------------
+/// SPHHash.h
+///  This is my SPHHash class, it will be used to calulate the hash keys from particle positions. 
+///  Our hash class. this class will hash particles based on their position and return neighbours of the same key
+
+//----------------------------------------------------------------------------------------------------------------------
+
+public class SPHHash
+{
+
+    ///  default constructor
+    public SPHHash()
+    {
+        m_smoothingLength = 1;
+        m_primes[0] = 73856093;
+        m_primes[1] = 19349663;
+        m_primes[2] = 83492791;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  default destructor
+    
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  mutator for our prime numbers if we want to set them to somthing else
+    ///  _arrayPos - position of the array that holds the 3 prime numbers
+    ///  _prime - the number you want to set it to
+    public  void setPrime(int _arrayPos, double _prime)
+    {
+        if (_arrayPos >= 0 && _arrayPos < 3)
+        {
+            m_primes[_arrayPos] = (int) _prime;
+        }
+    }
+
+    private static int EXIT_FAILURE = int.MinValue;
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  accessor for our prime numbers if we want to query them
+    ///  _arrayPos - the position of the array that holds the 3 prime numbers
+    public  int getPrime(int _arrayPos)
+    {
+        if (_arrayPos >= 0 && _arrayPos < 3)
+        {
+            return m_primes[_arrayPos];
+        } 
+        return EXIT_FAILURE;    
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief A mutatator for our smoothing length, h variable in navier stokes eqations
+    /// @param _smoothingLength - the smoothing length
+    public void setSmoothingLength(float _smoothingLength)
+    {
+        m_smoothingLength = _smoothingLength;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief returns our Smoothing Length if we need to query it
+    public float getSmoothingLength()
+    {
+        return m_smoothingLength;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief a function to fill our initially fill our hash table wil our particles
+    /// @param _particles - the vector of our particles
+    public void createHashTable(List<particle> _particles)
+    {
+        // clear any previous data we have
+        m_hashTable.Clear();
+        // Hash all our particles
+        m_hashTableSize = nextPrimeNum(2*_particles.Count);
+        for(int i=0; i <_particles.Count; i++)
+        {
+            m_hashTableAdd(hashFunction(_particles[i]), _particles[i]);
+        }
+    }
+
+    private void m_hashTableAdd(int key, particle value)
+    {
+        List<particle> values;
+        if (!m_hashTable.TryGetValue(key, out values))
+        {
+            values = new List<particle>();
+            m_hashTable[key] = values;
+        }
+
+        values.Add(value);
+    }
+
+    // If x is not 
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief Returns a vector of a particles neighbours
+    /// @param _currentParticle - the particle we want to ind the neighbours of
+    /// @return vector of particle neighbours to our current particles
+    public List<particle> getNeighbours(particle _currentParticle)
+    {
+        List<particle> neighbours = new List<particle>();
+        // calculate the key for our particle
+        int key = hashFunction(_currentParticle);
+        //find all the particles with the same key
+        if (m_hashTable.Any(kvp => kvp.Key == key))
+        {
+            neighbours = m_hashTable.First(kvp => kvp.Key == key).Value;
+        }
+        return neighbours;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  Returns a vector of a limited number of particles neighbours, used for optimization
+    ///  _currentParticle - the particle we want to ind the neighbours of
+    ///  numParticles - the max number of particles you want to sample
+    ///  numParticle amount or neighbours to our current particle
+    public List<particle> getNeighbours(particle _currentParticle, int numParticles)
+    {
+        List<particle> neighbours = new List<particle>();
+
+        int key = hashFunction(_currentParticle);
+        //find all the particles with the same key
+        if (m_hashTable.Any(kvp=>kvp.Key == key))
+        {
+            neighbours = m_hashTable.FirstOrDefault(kvp => kvp.Key == key).Value.Take(numParticles).ToList();
+        }
+
+        return neighbours;
+    }
+    //----------------------------------------------------------------------------------------------------------------------
+
+
+
+    /// Hash function that generates a key based on the particle position
+    ///  the particle we want to create the key for
+    protected int hashFunction(particle _particle)
+    {
+        int x_x = Mathf.FloorToInt(_particle.getPos().x / m_smoothingLength);
+        int x_y = Mathf.FloorToInt(_particle.getPos().y / m_smoothingLength);
+        int x_z = Mathf.FloorToInt(_particle.getPos().z / m_smoothingLength);
+        return (x_x * m_primes[0] ^ x_y * m_primes[1] ^ x_z * m_primes[2]) & m_hashTableSize;
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  A simple function that returns the next prime number from an input number. This is used in calculating our hash
+    ///  _currentNum - the number you want to calclate for
+    protected int nextPrimeNum(int _currentNum)
+    {
+        int nextPrime = _currentNum;
+        bool Prime = false;
+        if(_currentNum<=0){
+            Debug.LogError("The number input is less than or equal to zero");
+            return 1;
+        }
+        if(_currentNum==2){
+            return 2;
+        }
+        if((_currentNum % 2 ) == 0){
+            nextPrime+=1;
+        }
+        while(!Prime){
+            Prime = true;
+            for(int i = 3; i<Mathf.Sqrt(nextPrime); i+=2){
+                if((nextPrime % i)==0){
+                    Prime = false;
+                }
+            }
+            if(!Prime){
+                nextPrime+=2;
+            }
+        }
+    return nextPrime;
+    }
+
+
+    private int[] m_primes = new int[3];
+    //----------------------------------------------------------------------------------------------------------------------
+    ///  stores the smoothing length of our simulation
+    private float m_smoothingLength;
+    //----------------------------------------------------------------------------------------------------------------------
+    /// a multimap to store our particles and their hashed keys
+    /// 
+    private Dictionary<int, List<particle>> m_hashTable = new Dictionary<int, List<particle>>();
+    //----------------------------------------------------------------------------------------------------------------------
+    /// store the size of our hash table
+    private int m_hashTableSize;
+    //----------------------------------------------------------------------------------------------------------------------
+}
